@@ -47,7 +47,7 @@ func (o opt) releaseNotes(title string) string {
 %v`, title, o.commitNotes())
 }
 func (o opt) targetCommitish() string {
-	return o.Commits[0].Hash.Short
+	return o.Commits[0].Hash.Long
 }
 
 func newEditor() (*editor, error) {
@@ -184,7 +184,7 @@ func main() {
 			panic(err)
 		}
 		selected = &opt{Commits: commits}
-		version = "1.0.0"
+		version = tagPrefix + "1.0.0"
 	} else {
 
 		r := releases[0]
