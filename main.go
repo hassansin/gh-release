@@ -220,12 +220,22 @@ func main() {
 		}
 	}
 
+	prompt = promptui.Prompt{
+		Label:     "Please enter release tag",
+		AllowEdit: true,
+		Default:   version,
+	}
+	tagName, err := prompt.Run()
+	if err != nil {
+		panic(err)
+	}
+
 	ed, err := newEditor()
 	if err != nil {
 		panic(err)
 	}
 
-	msg, err := ed.edit(releaseNotes(version, commits))
+	msg, err := ed.edit(releaseNotes(tagName, commits))
 	if err != nil {
 		panic(err)
 	}
@@ -242,15 +252,6 @@ func main() {
 		newLines = append(newLines, line)
 	}
 
-	prompt = promptui.Prompt{
-		Label:     "Please enter release tag",
-		AllowEdit: true,
-		Default:   version,
-	}
-	tagName, err := prompt.Run()
-	if err != nil {
-		panic(err)
-	}
 	release := &github.Release{
 		Name:            newLines[0],
 		TagName:         tagName,
@@ -261,6 +262,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	success := color.New(color.Bold).PrintlnFunc()
+	success := color.New(color.Bold).PrintfFunc()
 	success("%v New release(%v) created\n", promptui.IconGood, release.TagName)
 }
