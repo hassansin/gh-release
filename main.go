@@ -21,33 +21,21 @@ const (
 	DefaultEditor      = "vim"
 	tagPrefix          = "v"
 	releaseMsgFilename = "RELEASE_MSG"
-	mode               = 0644
 )
 
 var releaseMsgFile = path.Join(".git", releaseMsgFilename)
 
-type opt struct {
-	Label   string
-	Commits []*gitlog.Commit
-}
-
-func (o opt) commitNotes() string {
+func releaseNotes(title string, commits []*gitlog.Commit) string {
 	notes := ""
-	for _, c := range o.Commits {
+	for _, c := range commits {
 		notes += fmt.Sprintf("* [%v] - %v\n", c.Hash.Short, c.Subject)
 	}
-	return notes
-}
-func (o opt) releaseNotes(title string) string {
 	return fmt.Sprintf(`%v
 # Please enter the realease title as the first line. Lines starting
 # with '#' will be ignored, and an empty message aborts the operation.
 **Commits**
 
-%v`, title, o.commitNotes())
-}
-func (o opt) targetCommitish() string {
-	return o.Commits[0].Hash.Long
+%v`, title, notes)
 }
 
 func newEditor() (*editor, error) {
@@ -88,6 +76,24 @@ func (ed editor) edit(msg string) (string, error) {
 	return string(data), err
 }
 
+func remoteBranches() ([]string, error) {
+	cmd := exec.Command("git", "ls-remote", "--heads", "-q")
+	data, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, errors.Wrap(err, string(data))
+	}
+	lines := strings.Split(string(data), "\n")
+	var branches []string
+	for _, line := range lines {
+		parts := strings.Split(line, "\t")
+		if len(parts) == 2 {
+			branches = append(branches, parts[1])
+		}
+	}
+	return branches, nil
+
+}
+
 func getCommitsRange(oldRev, newRev string) ([]*gitlog.Commit, error) {
 	git := gitlog.New(&gitlog.Config{Path: "."})
 	commits, err := git.Log(&gitlog.RevRange{newRev, oldRev}, nil)
@@ -103,57 +109,6 @@ func getCommits(rev string) ([]*gitlog.Commit, error) {
 		return nil, errors.Wrap(err, "getCommits")
 	}
 	return commits, nil
-}
-
-func getOption(oldRev, newRev string) (*opt, error) {
-	commits, err := getCommitsRange(oldRev, newRev)
-	if err != nil {
-		return nil, err
-	}
-	if len(commits) > 0 {
-		return &opt{
-			Label:   fmt.Sprintf("from %v to %v", oldRev, newRev),
-			Commits: commits,
-		}, nil
-	}
-	return nil, nil
-}
-
-func mustAppendOption(oldRev, newRev string, opts []*opt) []*opt {
-	opt, err := getOption(oldRev, newRev)
-	if err != nil {
-		panic(err)
-	}
-	if opt != nil {
-		return append(opts, opt)
-	}
-	return opts
-}
-
-func selectOption(opts []*opt) (*opt, error) {
-	tplCounts := `{{ print "(" (len .Commits)  " commits)" | faint }}`
-	templates := &promptui.SelectTemplates{
-		Label:    fmt.Sprintf("%s {{.Label}}: ", promptui.IconInitial),
-		Active:   fmt.Sprintf("%s {{.Label | cyan }} %v ", "▣", tplCounts),
-		Inactive: fmt.Sprintf("%s {{.Label }} %v", "▢", tplCounts),
-		Selected: fmt.Sprintf(`{{ "%s" | green }} {{.Label | faint }} %v`, promptui.IconGood, tplCounts),
-		Details: `
------- Commits ({{.Label | faint}}) ----- {{range .Commits}}
-{{.Hash.Short | magenta}} {{.Subject | faint}} {{end}}`,
-	}
-
-	prompt := promptui.Select{
-		Label:     "Please choose an option below",
-		Items:     opts,
-		Templates: templates,
-		Size:      4,
-	}
-
-	i, _, err := prompt.Run()
-	if err != nil {
-		return nil, err
-	}
-	return opts[i], nil
 }
 
 func main() {
@@ -174,16 +129,73 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	upsBr, err := br.Upstream()
+	if err != nil {
+		panic(err)
+	}
+	branches, err := remoteBranches()
+	if err != nil {
+		panic(err)
+	}
 
-	var selected *opt
+	target := upsBr.LongName()
+	cyan := color.New(color.FgCyan).SprintFunc()
+
+	prompt := promptui.Prompt{
+		Label:     fmt.Sprintf("Create a new release targetted to %v", cyan(upsBr.LongName())),
+		IsConfirm: true,
+		AllowEdit: false,
+		Default:   "y",
+		Validate: func(r string) error {
+			r = strings.ToLower(r)
+			if r == "" {
+				return nil
+			}
+			if r != "y" && r != "n" {
+				return errors.New("invalid input")
+			}
+			return nil
+		},
+	}
+	response, err := prompt.Run()
+	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
+		return
+	} else if err != nil && err.Error() != "" {
+		panic(err)
+	}
+	if strings.ToLower(response) == "n" {
+		templates := &promptui.SelectTemplates{
+			Label:    fmt.Sprintf("%s {{.}}: ", promptui.IconInitial),
+			Active:   fmt.Sprintf("%s {{.| cyan }}", "▣"),
+			Inactive: fmt.Sprintf("%s {{.}}", "▢"),
+			Selected: fmt.Sprintf(`{{ "%s" | green }} Target: {{.| cyan | bold }}`, promptui.IconGood),
+		}
+
+		prompt := promptui.Select{
+			Label:     "Please choose a target branch",
+			Items:     branches,
+			Templates: templates,
+			Size:      4,
+		}
+
+		i, _, err := prompt.Run()
+		if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
+			return
+		} else if err != nil {
+			panic(err)
+		}
+		target = branches[i]
+	}
+
+	var commits []*gitlog.Commit
 	version := ""
 
 	if len(releases) < 1 {
-		commits, err := getCommits(br.ShortName())
+		var err error
+		commits, err = getCommits(upsBr.LongName())
 		if err != nil {
 			panic(err)
 		}
-		selected = &opt{Commits: commits}
 		version = tagPrefix + "1.0.0"
 	} else {
 
@@ -198,29 +210,13 @@ func main() {
 			version = tagPrefix + version
 		}
 
-		upsBr, err := br.Upstream()
+		commits, err := getCommitsRange(r.TagName, target)
 		if err != nil {
 			panic(err)
 		}
-
-		var opts []*opt
-
-		opts = mustAppendOption(r.TagName, upsBr.LongName(), opts)
-		opts = mustAppendOption(r.TagName, br.ShortName(), opts)
-		opts = mustAppendOption(br.ShortName(), upsBr.LongName(), opts)
-		//draft
-		opts = mustAppendOption(upsBr.LongName(), br.ShortName(), opts)
-		if len(opts) == 0 {
-			cyan := color.New(color.FgCyan).SprintFunc()
-			fmt.Printf("your latest release(%v) already pointing to the HEAD of %v", cyan(r.TagName), cyan(upsBr.LongName()))
+		if len(commits) == 0 {
+			fmt.Printf("your latest release(%v) is already pointing to %v", cyan(r.TagName), cyan(target))
 			return
-		}
-
-		selected, err = selectOption(opts)
-		if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
-			return
-		} else if err != nil {
-			panic(err)
 		}
 	}
 
@@ -231,7 +227,7 @@ func main() {
 		panic(err)
 	}
 
-	msg, err := ed.edit(selected.releaseNotes(version))
+	msg, err := ed.edit(releaseNotes(version, commits))
 	if err != nil {
 		panic(err)
 	}
@@ -248,8 +244,8 @@ func main() {
 		newLines = append(newLines, line)
 	}
 
-	prompt := promptui.Prompt{
-		Label:     "Please enter Tag name",
+	prompt = promptui.Prompt{
+		Label:     "Please enter release tag",
 		AllowEdit: true,
 		Default:   version,
 	}
@@ -260,12 +256,12 @@ func main() {
 	release := &github.Release{
 		Name:            newLines[0],
 		TagName:         tagName,
-		TargetCommitish: selected.targetCommitish(),
+		TargetCommitish: target,
 		Body:            strings.Join(newLines[1:], "\n"),
 	}
-	r, err := c.CreateRelease(pr, release)
+	release, err = c.CreateRelease(pr, release)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("new release(%v) created\n", r.TagName)
+	fmt.Printf("New release(%v) created\n", release.TagName)
 }
