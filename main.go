@@ -262,6 +262,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	success := color.New(color.Bold).PrintfFunc()
+	success := color.New(color.FgWhite, color.Bold).PrintfFunc()
 	success("%v New release(%v) created\n", promptui.IconGood, release.TagName)
 }
