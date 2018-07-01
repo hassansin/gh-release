@@ -139,7 +139,7 @@ func main() {
 	}
 
 	target := upsBr.LongName()
-	cyan := color.New(color.FgCyan).SprintFunc()
+	cyan := color.New(color.FgCyan, color.Bold).SprintFunc()
 
 	prompt := promptui.Prompt{
 		Label:     fmt.Sprintf("Create a new release targetted to %v", cyan(upsBr.LongName())),
@@ -168,7 +168,7 @@ func main() {
 			Label:    fmt.Sprintf("%s {{.}}: ", promptui.IconInitial),
 			Active:   fmt.Sprintf("%s {{.| cyan }}", "▣"),
 			Inactive: fmt.Sprintf("%s {{.}}", "▢"),
-			Selected: fmt.Sprintf(`{{ "%s" | green }} Target: {{.| cyan | bold }}`, promptui.IconGood),
+			Selected: fmt.Sprintf(`{{ "%s" | green }} {{"%s" | bold}} {{.| cyan | bold }}`, promptui.IconGood, "Target:"),
 		}
 
 		prompt := promptui.Select{
@@ -210,7 +210,7 @@ func main() {
 			version = tagPrefix + version
 		}
 
-		commits, err := getCommitsRange(r.TagName, target)
+		commits, err = getCommitsRange(r.TagName, target)
 		if err != nil {
 			panic(err)
 		}
@@ -220,8 +220,6 @@ func main() {
 		}
 	}
 
-	/*
-	 */
 	ed, err := newEditor()
 	if err != nil {
 		panic(err)
@@ -256,12 +254,13 @@ func main() {
 	release := &github.Release{
 		Name:            newLines[0],
 		TagName:         tagName,
-		TargetCommitish: target,
+		TargetCommitish: commits[0].Hash.Long,
 		Body:            strings.Join(newLines[1:], "\n"),
 	}
 	release, err = c.CreateRelease(pr, release)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("New release(%v) created\n", release.TagName)
+	success := color.New(color.Bold).PrintlnFunc()
+	success("%v New release(%v) created\n", promptui.IconGood, release.TagName)
 }
