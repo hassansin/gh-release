@@ -61,19 +61,34 @@ type editor struct {
 	mode os.FileMode
 }
 
-func (ed editor) edit(msg string) (string, error) {
+func (ed editor) edit(msg string) (string, string, error) {
 	if err := ioutil.WriteFile(ed.file, []byte(msg), ed.mode); err != nil {
-		return "", fmt.Errorf("unable to write release message: %v", err)
+		return "", "", fmt.Errorf("unable to write release message: %v", err)
 	}
 	cmd := exec.Command(ed.path, ed.file)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("edit error: %v", err)
+		return "", "", fmt.Errorf("edit error: %v", err)
 	}
 	data, err := ioutil.ReadFile(ed.file)
-	return string(data), err
+	if err != nil {
+		return "", "", err
+	}
+	//validate:
+	//1. remove comments
+	//2. remove trailing blank lines
+	//3. at least one non-empty line
+	lines := strings.Split(string(data), "\n")
+	newLines := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimPrefix(line, " "), "#") {
+			continue
+		}
+		newLines = append(newLines, line)
+	}
+	return newLines[0], strings.Join(newLines[1:], "\n"), nil
 }
 
 func remoteBranches() ([]string, error) {
@@ -96,7 +111,7 @@ func remoteBranches() ([]string, error) {
 
 func getCommitsRange(oldRev, newRev string) ([]*gitlog.Commit, error) {
 	git := gitlog.New(&gitlog.Config{Path: "."})
-	commits, err := git.Log(&gitlog.RevRange{newRev, oldRev}, nil)
+	commits, err := git.Log(&gitlog.RevRange{New: newRev, Old: oldRev}, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "getCommitsRange")
 	}
@@ -104,7 +119,7 @@ func getCommitsRange(oldRev, newRev string) ([]*gitlog.Commit, error) {
 }
 func getCommits(rev string) ([]*gitlog.Commit, error) {
 	git := gitlog.New(&gitlog.Config{Path: "."})
-	commits, err := git.Log(&gitlog.Rev{rev}, nil)
+	commits, err := git.Log(&gitlog.Rev{Ref: rev}, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "getCommits")
 	}
@@ -188,7 +203,7 @@ func main() {
 	}
 
 	var commits []*gitlog.Commit
-	version := ""
+	var version string
 
 	if len(releases) < 1 {
 		var err error
@@ -226,7 +241,9 @@ func main() {
 		Default:   version,
 	}
 	tagName, err := prompt.Run()
-	if err != nil {
+	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
+		return
+	} else if err != nil {
 		panic(err)
 	}
 
@@ -235,28 +252,19 @@ func main() {
 		panic(err)
 	}
 
-	msg, err := ed.edit(releaseNotes(tagName, commits))
+	title, body, err := ed.edit(releaseNotes(tagName, commits))
 	if err != nil {
 		panic(err)
 	}
-	//validate:
-	//1. remove comments
-	//2. remove trailing blank lines
-	//3. at least one non-empty line
-	lines := strings.Split(msg, "\n")
-	newLines := lines[:0]
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimPrefix(line, " "), "#") {
-			continue
-		}
-		newLines = append(newLines, line)
+	if title == "" || len(body) == 0 {
+		return
 	}
 
 	release := &github.Release{
-		Name:            newLines[0],
+		Name:            title,
 		TagName:         tagName,
 		TargetCommitish: commits[0].Hash.Long,
-		Body:            strings.Join(newLines[1:], "\n"),
+		Body:            body,
 	}
 	release, err = c.CreateRelease(pr, release)
 	if err != nil {
