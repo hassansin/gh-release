@@ -120,7 +120,7 @@ func do() error {
 	release := &github.RepositoryRelease{
 		Name:            &title,
 		TagName:         &tagName,
-		TargetCommitish: compare.Commits[len(compare.Commits)].SHA,
+		TargetCommitish: compare.Commits[len(compare.Commits)-1].SHA,
 		Body:            &body,
 	}
 	release, _, err = client.Repositories.CreateRelease(ctx, owner, repo, release)
