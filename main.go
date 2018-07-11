@@ -35,6 +35,7 @@ var (
 	reVal          = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
 
 	cyan          = promptui.Styler(promptui.FGCyan, promptui.FGBold)
+	green         = promptui.Styler(promptui.FGGreen, promptui.FGBold)
 	faint         = promptui.Styler(promptui.FGFaint, promptui.FGBold)
 	startBoldCyan = strings.Replace(cyan(""), promptui.ResetCode, "", -1)
 	reset         = promptui.ResetCode
@@ -127,7 +128,7 @@ func do() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%v New release(%v) created\n", promptui.IconGood, cyan(*release.TagName))
+	fmt.Printf("%v New release(%v) created\n", green(promptui.IconGood), cyan(*release.TagName))
 	return nil
 }
 
