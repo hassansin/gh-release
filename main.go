@@ -295,14 +295,18 @@ func parseConfig(data []byte) (string, string) {
 func releaseNotes(title string, commits []github.RepositoryCommit) string {
 	notes := ""
 	for i := len(commits) - 1; i >= 0; i-- {
-		lines := strings.Split(*commits[i].Commit.Message, "\n")
-		notes += fmt.Sprintf("* [%v] - %v\n", *commits[i].SHA, lines[0])
+		c := commits[i]
+		lines := strings.Split(*c.Commit.Message, "\n")
+		notes += fmt.Sprintf("#* [%v] - %v (%v)\n", *c.SHA, lines[0], *c.Commit.Author.Name)
 	}
-	return fmt.Sprintf(`%v
+	return fmt.Sprintf(`#%v
+#
 # Please enter the realease title as the first line. Lines starting
-# with '#' will be ignored, and an empty message aborts the operation.
-**Commits**
-
+# with '#' will be ignored, and an empty title & message aborts the operation.
+# By removing starting '#' of lines below, you can put them in release body.
+#
+# **Commits**
+#
 %v`, title, notes)
 }
 
