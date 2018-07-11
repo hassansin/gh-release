@@ -1,19 +1,25 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"os/user"
 	"path"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/blang/semver"
 	"github.com/fatih/color"
-	"github.com/github/hub/github"
+	"github.com/google/go-github/github"
 	"github.com/manifoldco/promptui"
 	"github.com/pkg/errors"
-	gitlog "github.com/tsuyoshiwada/go-gitlog"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -23,12 +29,270 @@ const (
 	releaseMsgFilename = "RELEASE_MSG"
 )
 
-var releaseMsgFile = path.Join(".git", releaseMsgFilename)
+var (
+	releaseMsgFile = path.Join(".git", releaseMsgFilename)
+	reRepo         = regexp.MustCompile(`([a-z-]+)/([a-z-]+)`)
+	reSection      = regexp.MustCompile(`^\[(\w+)\]`)
+	reVal          = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
 
-func releaseNotes(title string, commits []*gitlog.Commit) string {
+	cyan  = color.New(color.FgCyan, color.Bold).SprintFunc()
+	faint = color.New(color.FgWhite, color.Faint).SprintfFunc()
+)
+
+func main() {
+	if err := do(); err != nil {
+		panic(err)
+	}
+}
+
+func do() error {
+	token, err := getToken()
+	if err != nil {
+		return err
+	}
+	owner, repo, err := getCurrentRepo()
+
+	ctx := context.Background()
+	client := newClient(ctx, token)
+	if err != nil {
+		return err
+	}
+	latest, branches, err := getBranchesAndReleases(client, owner, repo)
+	if err != nil {
+		return err
+	}
+	if latest == nil {
+		panic("no previous release") //@TODO
+	}
+	target, err := selectTarget(branches)
+	if err != nil || target == nil {
+		return err
+	}
+	lastRel := *latest.TagName
+	v, err := semver.Make(strings.TrimPrefix(lastRel, tagPrefix))
+	if err != nil {
+		panic(err)
+	}
+	v.Patch++
+	version := v.String()
+	if strings.HasPrefix(lastRel, tagPrefix) {
+		version = tagPrefix + version
+	}
+	compare, _, err := client.Repositories.CompareCommits(ctx, owner, repo, lastRel, *target.Name)
+	if err != nil {
+		return err
+	}
+	if *compare.Status == "behind" {
+		fmt.Printf("%v is already released", *target.Name)
+		return nil
+	}
+	templates := &promptui.PromptTemplates{
+		Success: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}}`, promptui.IconGood, "Tag: "),
+	}
+	prompt := promptui.Prompt{
+		Label:     fmt.Sprintf("Please enter release tag %v", faint("(last release: %v)", lastRel)),
+		AllowEdit: true,
+		Default:   version,
+		Templates: templates,
+	}
+	tagName, err := prompt.Run()
+	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	ed, err := newEditor()
+	if err != nil {
+		return err
+	}
+
+	title, body, err := ed.edit(releaseNotes(tagName, compare.Commits))
+	if err != nil {
+		return err
+	}
+	if title == "" || len(body) == 0 {
+		fmt.Println("aborting due to empty release title and message")
+		return nil
+	}
+	release := &github.RepositoryRelease{
+		Name:            &title,
+		TagName:         &tagName,
+		TargetCommitish: compare.Commits[0].SHA,
+		Body:            &body,
+	}
+	release, _, err = client.Repositories.CreateRelease(ctx, owner, repo, release)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%v New release(%v) created\n", promptui.IconGood, release.TagName)
+	return nil
+}
+
+func getBranchesAndReleases(client *github.Client, owner, repo string) (*github.RepositoryRelease, []*github.Branch, error) {
+	var latest *github.RepositoryRelease
+	var branches []*github.Branch
+	var err error
+	var wg sync.WaitGroup
+	ctx := context.Background()
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		var e error
+		latest, _, e = client.Repositories.GetLatestRelease(ctx, owner, repo)
+		if err == nil {
+			err = e
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		var e error
+		branches, _, e = client.Repositories.ListBranches(ctx, owner, repo, nil)
+		if err == nil {
+			err = e
+		}
+	}()
+	wg.Wait()
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cur, err := getCurrentBranch()
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Slice(branches, func(i, j int) bool {
+		li := len(*branches[i].Name)
+		lj := len(*branches[j].Name)
+		if *branches[i].Name == cur {
+			li = 0
+		}
+		if *branches[j].Name == cur {
+			lj = 0
+		}
+		return li < lj
+	})
+	return latest, branches, err
+}
+func getCurrentBranch() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+func selectTarget(branches []*github.Branch) (*github.Branch, error) {
+	options := make([]string, len(branches))
+	for i, b := range branches {
+		options[i] = *b.Name
+	}
+
+	templates := &promptui.SelectTemplates{
+		Label:    fmt.Sprintf("%s {{.}} ", promptui.IconInitial),
+		Active:   fmt.Sprintf(`%s {{.| cyan }}`, "▣"),
+		Inactive: fmt.Sprintf("%s {{.}}", "▢"),
+		Selected: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} {{.| cyan | bold }}`, promptui.IconGood, "Target:"),
+	}
+
+	prompt := promptui.Select{
+		Label:     "Please choose a target branch",
+		Items:     options,
+		Templates: templates,
+		Size:      4,
+	}
+
+	i, _, err := prompt.Run()
+	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return branches[i], nil
+}
+
+func newClient(ctx context.Context, token string) *github.Client {
+	ts := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: token},
+	)
+	tc := oauth2.NewClient(ctx, ts)
+	return github.NewClient(tc)
+}
+
+func getToken() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	gitconfigPath := filepath.Join(u.HomeDir, string(filepath.Separator), ".gitconfig")
+	data, err := ioutil.ReadFile(gitconfigPath)
+	if err != nil {
+		return "", err
+	}
+	_, token := parseConfig(data)
+	return token, nil
+}
+
+func getCurrentRepo() (string, string, error) {
+
+	if ok, err := isGitRepo(); err != nil {
+		return "", "", err
+	} else if !ok {
+		return "", "", errors.New("not inside a git repo")
+	}
+	cmd := exec.Command("git", "ls-remote", "--get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", err
+	}
+	if m := reRepo.FindStringSubmatch(string(out)); m != nil {
+		return m[1], m[2], nil
+	}
+	return "", "", nil
+}
+
+func isGitRepo() (bool, error) {
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
+}
+
+func parseConfig(data []byte) (string, string) {
+	config := string(data)
+	lines := strings.Split(config, "\n")
+	found := false
+	var user, token string
+	for _, line := range lines {
+		if found {
+			if m := reVal.FindStringSubmatch(line); m != nil {
+				if m[1] == "user" {
+					user = m[2]
+				}
+				if m[1] == "token" {
+					token = m[2]
+				}
+				continue
+			}
+		}
+		if found && reSection.MatchString(line) {
+			found = false
+		}
+		if reSection.MatchString(line) {
+			matches := reSection.FindStringSubmatch(line)
+			if matches != nil && len(matches) == 2 && matches[1] == "github" {
+				found = true
+				continue
+			}
+		}
+	}
+	return user, token
+}
+
+func releaseNotes(title string, commits []github.RepositoryCommit) string {
 	notes := ""
 	for _, c := range commits {
-		notes += fmt.Sprintf("* [%v] - %v\n", c.Hash.Short, c.Subject)
+		notes += fmt.Sprintf("* [%v] - %v\n", (*c.SHA)[0:6], *c.Commit.Message)
 	}
 	return fmt.Sprintf(`%v
 # Please enter the realease title as the first line. Lines starting
@@ -89,186 +353,4 @@ func (ed editor) edit(msg string) (string, string, error) {
 		newLines = append(newLines, line)
 	}
 	return newLines[0], strings.Join(newLines[1:], "\n"), nil
-}
-
-func remoteBranches() ([]string, error) {
-	cmd := exec.Command("git", "ls-remote", "--heads", "-q")
-	data, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, errors.Wrap(err, string(data))
-	}
-	lines := strings.Split(string(data), "\n")
-	var branches []string
-	for _, line := range lines {
-		parts := strings.Split(line, "\t")
-		if len(parts) == 2 {
-			branches = append(branches, parts[1])
-		}
-	}
-	return branches, nil
-
-}
-
-func getCommitsRange(oldRev, newRev string) ([]*gitlog.Commit, error) {
-	git := gitlog.New(&gitlog.Config{Path: "."})
-	commits, err := git.Log(&gitlog.RevRange{New: newRev, Old: oldRev}, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "getCommitsRange")
-	}
-	return commits, nil
-}
-func getCommits(rev string) ([]*gitlog.Commit, error) {
-	git := gitlog.New(&gitlog.Config{Path: "."})
-	commits, err := git.Log(&gitlog.Rev{Ref: rev}, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "getCommits")
-	}
-	return commits, nil
-}
-
-func main() {
-	c := github.NewClient("github.com")
-	repo, err := github.LocalRepo()
-	if err != nil {
-		panic(err)
-	}
-	pr, err := repo.CurrentProject()
-	if err != nil {
-		panic(err)
-	}
-	releases, err := c.FetchReleases(pr, 1, nil)
-	if err != nil {
-		panic(err)
-	}
-	br, err := repo.CurrentBranch()
-	if err != nil {
-		panic(err)
-	}
-	upsBr, err := br.Upstream()
-	if err != nil {
-		panic(err)
-	}
-	branches, err := remoteBranches()
-	if err != nil {
-		panic(err)
-	}
-
-	target := upsBr.LongName()
-	cyan := color.New(color.FgCyan, color.Bold).SprintFunc()
-
-	prompt := promptui.Prompt{
-		Label:     fmt.Sprintf("Create a new release targetted to %v", cyan(upsBr.LongName())),
-		IsConfirm: true,
-		AllowEdit: false,
-		Default:   "y",
-		Validate: func(r string) error {
-			r = strings.ToLower(r)
-			if r == "" {
-				return nil
-			}
-			if r != "y" && r != "n" {
-				return errors.New("invalid input")
-			}
-			return nil
-		},
-	}
-	response, err := prompt.Run()
-	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
-		return
-	} else if err != nil && err.Error() != "" {
-		panic(err)
-	}
-	if strings.ToLower(response) == "n" {
-		templates := &promptui.SelectTemplates{
-			Label:    fmt.Sprintf("%s {{.}}: ", promptui.IconInitial),
-			Active:   fmt.Sprintf("%s {{.| cyan }}", "▣"),
-			Inactive: fmt.Sprintf("%s {{.}}", "▢"),
-			Selected: fmt.Sprintf(`{{ "%s" | green }} {{"%s" | bold}} {{.| cyan | bold }}`, promptui.IconGood, "Target:"),
-		}
-
-		prompt := promptui.Select{
-			Label:     "Please choose a target branch",
-			Items:     branches,
-			Templates: templates,
-			Size:      4,
-		}
-
-		i, _, err := prompt.Run()
-		if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
-			return
-		} else if err != nil {
-			panic(err)
-		}
-		target = branches[i]
-	}
-
-	var commits []*gitlog.Commit
-	var version string
-
-	if len(releases) < 1 {
-		var err error
-		commits, err = getCommits(upsBr.LongName())
-		if err != nil {
-			panic(err)
-		}
-		version = tagPrefix + "1.0.0"
-	} else {
-
-		r := releases[0]
-		v, err := semver.Make(strings.TrimPrefix(r.TagName, tagPrefix))
-		if err != nil {
-			panic(err)
-		}
-		v.Patch++
-		version = v.String()
-		if strings.HasPrefix(r.TagName, tagPrefix) {
-			version = tagPrefix + version
-		}
-
-		commits, err = getCommitsRange(r.TagName, target)
-		if err != nil {
-			panic(err)
-		}
-		if len(commits) == 0 {
-			fmt.Printf("your latest release(%v) is already pointing to %v", cyan(r.TagName), cyan(target))
-			return
-		}
-	}
-
-	prompt = promptui.Prompt{
-		Label:     "Please enter release tag",
-		AllowEdit: true,
-		Default:   version,
-	}
-	tagName, err := prompt.Run()
-	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
-		return
-	} else if err != nil {
-		panic(err)
-	}
-
-	ed, err := newEditor()
-	if err != nil {
-		panic(err)
-	}
-
-	title, body, err := ed.edit(releaseNotes(tagName, commits))
-	if err != nil {
-		panic(err)
-	}
-	if title == "" || len(body) == 0 {
-		return
-	}
-
-	release := &github.Release{
-		Name:            title,
-		TagName:         tagName,
-		TargetCommitish: commits[0].Hash.Long,
-		Body:            body,
-	}
-	release, err = c.CreateRelease(pr, release)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("%v New release(%v) created\n", promptui.IconGood, release.TagName)
 }
