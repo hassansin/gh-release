@@ -294,8 +294,9 @@ func parseConfig(data []byte) (string, string) {
 
 func releaseNotes(title string, commits []github.RepositoryCommit) string {
 	notes := ""
-	for _, c := range commits {
-		notes += fmt.Sprintf("* [%v] - %v\n", (*c.SHA)[0:6], *c.Commit.Message)
+	for i := len(commits) - 1; i >= 0; i-- {
+		lines := strings.Split(*commits[i].Commit.Message, "\n")
+		notes += fmt.Sprintf("* [%v] - %v\n", *commits[i].SHA, lines[0])
 	}
 	return fmt.Sprintf(`%v
 # Please enter the realease title as the first line. Lines starting
