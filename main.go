@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/blang/semver"
-	"github.com/fatih/color"
 	"github.com/google/go-github/github"
 	"github.com/manifoldco/promptui"
 	"github.com/pkg/errors"
@@ -35,8 +34,10 @@ var (
 	reSection      = regexp.MustCompile(`^\[(\w+)\]`)
 	reVal          = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
 
-	cyan  = color.New(color.FgCyan, color.Bold).SprintFunc()
-	faint = color.New(color.FgWhite, color.Faint).SprintfFunc()
+	cyan          = promptui.Styler(promptui.FGCyan, promptui.FGBold)
+	faint         = promptui.Styler(promptui.FGFaint, promptui.FGBold)
+	startBoldCyan = strings.Replace(cyan(""), promptui.ResetCode, "", -1)
+	reset         = promptui.ResetCode
 )
 
 func main() {
@@ -87,15 +88,16 @@ func do() error {
 		return nil
 	}
 	templates := &promptui.PromptTemplates{
-		Success: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}}`, promptui.IconGood, "Tag: "),
+		Success: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} %v`, promptui.IconGood, "Tag:", startBoldCyan),
 	}
 	prompt := promptui.Prompt{
-		Label:     fmt.Sprintf("Please enter release tag %v", faint("(last release: %v)", lastRel)),
+		Label:     fmt.Sprintf("Please enter release tag (last release: %v)", cyan(lastRel)),
 		AllowEdit: true,
 		Default:   version,
 		Templates: templates,
 	}
 	tagName, err := prompt.Run()
+	fmt.Print(reset)
 	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
 		return nil
 	} else if err != nil {
@@ -118,14 +120,14 @@ func do() error {
 	release := &github.RepositoryRelease{
 		Name:            &title,
 		TagName:         &tagName,
-		TargetCommitish: compare.Commits[0].SHA,
+		TargetCommitish: compare.Commits[len(compare.Commits)].SHA,
 		Body:            &body,
 	}
 	release, _, err = client.Repositories.CreateRelease(ctx, owner, repo, release)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%v New release(%v) created\n", promptui.IconGood, release.TagName)
+	fmt.Printf("%v New release(%v) created\n", promptui.IconGood, cyan(*release.TagName))
 	return nil
 }
 
