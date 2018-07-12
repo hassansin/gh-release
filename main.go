@@ -104,10 +104,13 @@ func wrap(err error, msg string) error {
 	}
 	return err
 }
+
+//abort exits with non-zero status, prints pretty error message instead of panic
 func abort(err error) {
 	fmt.Printf("%v %v\n", promptui.IconBad, err)
 	os.Exit(1)
 }
+
 func do(editorCmd []string, token string) error {
 	owner, repo, head, err := getCurrentRepo()
 	if err != nil {
@@ -129,14 +132,9 @@ func do(editorCmd []string, token string) error {
 		return err
 	}
 	lastRel := *latest.TagName
-	v, err := semver.Make(strings.TrimPrefix(lastRel, tagPrefix))
+	version, err := nextVersion(lastRel)
 	if err != nil {
 		return err
-	}
-	v.Patch++
-	version := v.String()
-	if strings.HasPrefix(lastRel, tagPrefix) {
-		version = tagPrefix + version
 	}
 	compare, err := client.compare(lastRel, *target.Name)
 	if err != nil {
@@ -145,20 +143,9 @@ func do(editorCmd []string, token string) error {
 	if *compare.Status != "ahead" {
 		return errors.Errorf("%v is already released", cyan(*target.Name))
 	}
-	templates := &promptui.PromptTemplates{
-		Success: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} %v`, promptui.IconGood, "Tag:", startBoldCyan),
-	}
-	prompt := promptui.Prompt{
-		Label:     fmt.Sprintf("Please enter release tag (last release: %v)", cyan(lastRel)),
-		AllowEdit: true,
-		Default:   version,
-		Templates: templates,
-	}
-	tagName, err := prompt.Run()
-	fmt.Print(promptui.ResetCode)
-	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
-		return nil
-	} else if err != nil {
+
+	tagName, err := promptTag(version, lastRel)
+	if err != nil || tagName == "" {
 		return err
 	}
 
@@ -179,6 +166,18 @@ func do(editorCmd []string, token string) error {
 	return nil
 }
 
+func nextVersion(tag string) (string, error) {
+	v, err := semver.Make(strings.TrimPrefix(tag, tagPrefix))
+	if err != nil {
+		return "", err
+	}
+	v.Patch++
+	version := v.String()
+	if strings.HasPrefix(tag, tagPrefix) {
+		version = tagPrefix + version
+	}
+	return version, nil
+}
 func getBranchesAndReleases(client *Client) (*github.RepositoryRelease, []*github.Branch, error) {
 	var latest *github.RepositoryRelease
 	var branches []*github.Branch
@@ -220,6 +219,25 @@ func sortBranches(branches []*github.Branch, head string) {
 	})
 }
 
+func promptTag(tag, lastRel string) (string, error) {
+	templates := &promptui.PromptTemplates{
+		Success: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} %v`, promptui.IconGood, "Tag:", startBoldCyan),
+	}
+	prompt := promptui.Prompt{
+		Label:     fmt.Sprintf("Please enter release tag (last release: %v)", cyan(lastRel)),
+		AllowEdit: true,
+		Default:   tag,
+		Templates: templates,
+	}
+	tagName, err := prompt.Run()
+	fmt.Print(promptui.ResetCode)
+	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	return tagName, nil
+}
 func selectTarget(branches []*github.Branch) (*github.Branch, error) {
 	options := make([]string, len(branches))
 	for i, b := range branches {
