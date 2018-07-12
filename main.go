@@ -162,7 +162,8 @@ func do(editorCmd []string, token string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%v New release(%v) created\n", green(promptui.IconGood), cyan(*release.TagName))
+
+	fmt.Printf("%v New release(%v) created:\n\t%v\n", green(promptui.IconGood), cyan(*release.TagName), *release.HTMLURL)
 	return nil
 }
 
@@ -224,7 +225,7 @@ func promptTag(tag, lastRel string) (string, error) {
 		Success: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} %v`, promptui.IconGood, "Tag:", startBoldCyan),
 	}
 	prompt := promptui.Prompt{
-		Label:     fmt.Sprintf("Please enter release tag (last release: %v)", cyan(lastRel)),
+		Label:     fmt.Sprintf("Enter release tag (last release: %v)", cyan(lastRel)),
 		AllowEdit: true,
 		Default:   tag,
 		Templates: templates,
@@ -252,7 +253,7 @@ func selectTarget(branches []*github.Branch) (*github.Branch, error) {
 	}
 
 	prompt := promptui.Select{
-		Label:     "Please choose a target branch",
+		Label:     "Choose a target branch",
 		Items:     options,
 		Templates: templates,
 		Size:      4,
