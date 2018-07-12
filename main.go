@@ -22,8 +22,7 @@ import (
 )
 
 const (
-	//DefaultEditor - editor to use when $EDITOR env is empty
-	DefaultEditor      = "vim"
+	defaultEditor      = "vim"
 	tagPrefix          = "v"
 	releaseMsgFilename = "RELEASE_MSG"
 )
@@ -38,7 +37,6 @@ var (
 	green         = promptui.Styler(promptui.FGGreen, promptui.FGBold)
 	faint         = promptui.Styler(promptui.FGFaint, promptui.FGBold)
 	startBoldCyan = strings.Replace(cyan(""), promptui.ResetCode, "", -1)
-	reset         = promptui.ResetCode
 )
 
 func main() {
@@ -154,7 +152,7 @@ func do() error {
 		Templates: templates,
 	}
 	tagName, err := prompt.Run()
-	fmt.Print(reset)
+	fmt.Print(promptui.ResetCode)
 	if err == promptui.ErrInterrupt || err == promptui.ErrEOF {
 		return nil
 	} else if err != nil {
@@ -208,7 +206,7 @@ func getBranchesAndReleases(client *Client) (*github.RepositoryRelease, []*githu
 	return latest, branches, err
 }
 
-//sort branches by branch string length, keeping head at the top
+//sort branches by branch name length, keeping head at the top
 func sortBranches(branches []*github.Branch, head string) {
 	sort.Slice(branches, func(i, j int) bool {
 		li := len(*branches[i].Name)
@@ -342,7 +340,7 @@ func releaseNotes(title string, commits []github.RepositoryCommit) string {
 # with '#' will be ignored, and an empty title & message aborts the operation.
 # By removing starting '#' of lines below, you can put them in release body.
 #
-# **Commits**
+#**Commits**
 #
 %v`, title, notes)
 }
@@ -350,7 +348,7 @@ func releaseNotes(title string, commits []github.RepositoryCommit) string {
 func newEditor() (*editor, error) {
 	env := os.Getenv("EDITOR")
 	if env == "" {
-		env = DefaultEditor
+		env = defaultEditor
 	}
 	path, err := exec.LookPath(env)
 	if err != nil {
