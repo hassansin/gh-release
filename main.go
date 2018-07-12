@@ -16,7 +16,7 @@ import (
 
 	"github.com/blang/semver"
 	"github.com/google/go-github/github"
-	"github.com/manifoldco/promptui"
+	"github.com/hassansin/promptui"
 	"github.com/pkg/errors"
 	"golang.org/x/oauth2"
 )
@@ -42,9 +42,64 @@ var (
 )
 
 func main() {
+	mustBeGitRepo()
 	if err := do(); err != nil {
 		panic(err)
 	}
+}
+
+func newClient(token, owner, repo string) *Client {
+	ctx := context.Background()
+	ts := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: token},
+	)
+	tc := oauth2.NewClient(ctx, ts)
+	client := github.NewClient(tc)
+	return &Client{
+		client: client,
+		owner:  owner,
+		repo:   repo,
+		ctx:    ctx,
+	}
+}
+
+//Client - Wrapper around github.Client
+type Client struct {
+	ctx         context.Context
+	owner, repo string
+	client      *github.Client
+}
+
+func (c *Client) compare(base, head string) (*github.CommitsComparison, error) {
+	compare, _, err := c.client.Repositories.CompareCommits(c.ctx, c.owner, c.repo, base, head)
+	return compare, wrap(err, "unable to compare commits")
+}
+
+func (c *Client) createRelease(title, tag, target, body string) (*github.RepositoryRelease, error) {
+	release, _, err := c.client.Repositories.CreateRelease(c.ctx, c.owner, c.repo, &github.RepositoryRelease{
+		Name:            &title,
+		TagName:         &tag,
+		TargetCommitish: &target,
+		Body:            &body,
+	})
+	return release, wrap(err, "unable to create new release")
+}
+func (c *Client) getLatestRelease() (*github.RepositoryRelease, error) {
+	latest, _, err := c.client.Repositories.GetLatestRelease(c.ctx, c.owner, c.repo)
+	return latest, wrap(err, "unable to get latest release")
+}
+
+func (c *Client) listBranches() ([]*github.Branch, error) {
+	branches, _, err := c.client.Repositories.ListBranches(c.ctx, c.owner, c.repo, nil)
+	return branches, wrap(err, "unable to list branches")
+}
+
+//wrap wraps an error with context
+func wrap(err error, msg string) error {
+	if err != nil {
+		err = errors.Wrap(err, msg)
+	}
+	return err
 }
 
 func do() error {
@@ -52,19 +107,20 @@ func do() error {
 	if err != nil {
 		return err
 	}
-	owner, repo, err := getCurrentRepo()
+	owner, repo, head, err := getCurrentRepo()
+	if err != nil {
+		return err
+	}
+	client := newClient(token, owner, repo)
 
-	ctx := context.Background()
-	client := newClient(ctx, token)
+	latest, branches, err := getBranchesAndReleases(client)
 	if err != nil {
 		return err
 	}
-	latest, branches, err := getBranchesAndReleases(client, owner, repo)
-	if err != nil {
-		return err
-	}
+	sortBranches(branches, head)
+
 	if latest == nil {
-		panic("no previous release") //@TODO
+		return errors.New("no previous release") //@TODO
 	}
 	target, err := selectTarget(branches)
 	if err != nil || target == nil {
@@ -80,7 +136,7 @@ func do() error {
 	if strings.HasPrefix(lastRel, tagPrefix) {
 		version = tagPrefix + version
 	}
-	compare, _, err := client.Repositories.CompareCommits(ctx, owner, repo, lastRel, *target.Name)
+	compare, err := client.compare(lastRel, *target.Name)
 	if err != nil {
 		return err
 	}
@@ -118,13 +174,7 @@ func do() error {
 		fmt.Println("aborting due to empty release title and message")
 		return nil
 	}
-	release := &github.RepositoryRelease{
-		Name:            &title,
-		TagName:         &tagName,
-		TargetCommitish: compare.Commits[len(compare.Commits)-1].SHA,
-		Body:            &body,
-	}
-	release, _, err = client.Repositories.CreateRelease(ctx, owner, repo, release)
+	release, err := client.createRelease(title, tagName, *compare.Commits[len(compare.Commits)-1].SHA, body)
 	if err != nil {
 		return err
 	}
@@ -132,17 +182,16 @@ func do() error {
 	return nil
 }
 
-func getBranchesAndReleases(client *github.Client, owner, repo string) (*github.RepositoryRelease, []*github.Branch, error) {
+func getBranchesAndReleases(client *Client) (*github.RepositoryRelease, []*github.Branch, error) {
 	var latest *github.RepositoryRelease
 	var branches []*github.Branch
 	var err error
 	var wg sync.WaitGroup
-	ctx := context.Background()
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		var e error
-		latest, _, e = client.Repositories.GetLatestRelease(ctx, owner, repo)
+		latest, e = client.getLatestRelease()
 		if err == nil {
 			err = e
 		}
@@ -150,39 +199,30 @@ func getBranchesAndReleases(client *github.Client, owner, repo string) (*github.
 	go func() {
 		defer wg.Done()
 		var e error
-		branches, _, e = client.Repositories.ListBranches(ctx, owner, repo, nil)
+		branches, e = client.listBranches()
 		if err == nil {
 			err = e
 		}
 	}()
 	wg.Wait()
+	return latest, branches, err
+}
 
-	if err != nil {
-		return nil, nil, err
-	}
-
-	cur, err := getCurrentBranch()
-	if err != nil {
-		return nil, nil, err
-	}
+//sort branches by branch string length, keeping head at the top
+func sortBranches(branches []*github.Branch, head string) {
 	sort.Slice(branches, func(i, j int) bool {
 		li := len(*branches[i].Name)
 		lj := len(*branches[j].Name)
-		if *branches[i].Name == cur {
+		if *branches[i].Name == head {
 			li = 0
 		}
-		if *branches[j].Name == cur {
+		if *branches[j].Name == head {
 			lj = 0
 		}
 		return li < lj
 	})
-	return latest, branches, err
 }
-func getCurrentBranch() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
-	return strings.TrimSpace(string(out)), err
-}
+
 func selectTarget(branches []*github.Branch) (*github.Branch, error) {
 	options := make([]string, len(branches))
 	for i, b := range branches {
@@ -212,14 +252,6 @@ func selectTarget(branches []*github.Branch) (*github.Branch, error) {
 	return branches[i], nil
 }
 
-func newClient(ctx context.Context, token string) *github.Client {
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: token},
-	)
-	tc := oauth2.NewClient(ctx, ts)
-	return github.NewClient(tc)
-}
-
 func getToken() (string, error) {
 	u, err := user.Current()
 	if err != nil {
@@ -234,62 +266,67 @@ func getToken() (string, error) {
 	return token, nil
 }
 
-func getCurrentRepo() (string, string, error) {
-
-	if ok, err := isGitRepo(); err != nil {
-		return "", "", err
-	} else if !ok {
-		return "", "", errors.New("not inside a git repo")
-	}
+func getCurrentRepo() (owner string, repo string, head string, err error) {
 	cmd := exec.Command("git", "ls-remote", "--get-url", "origin")
-	out, err := cmd.Output()
+	var out []byte
+	out, err = cmd.Output()
 	if err != nil {
-		return "", "", err
+		return
 	}
 	if m := reRepo.FindStringSubmatch(string(out)); m != nil {
-		return m[1], m[2], nil
+		owner, repo = m[1], m[2]
 	}
-	return "", "", nil
+	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	out, err = cmd.Output()
+	head = strings.TrimSpace(string(out))
+	return
 }
 
-func isGitRepo() (bool, error) {
+func mustBeGitRepo() {
 	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
 	out, err := cmd.Output()
 	if err != nil {
-		return false, err
+		panic(err)
 	}
-	return strings.TrimSpace(string(out)) == "true", nil
+	if strings.TrimSpace(string(out)) != "true" {
+		panic(errors.New("not a git repo"))
+	}
 }
 
-func parseConfig(data []byte) (string, string) {
-	config := string(data)
-	lines := strings.Split(config, "\n")
-	found := false
-	var user, token string
-	for _, line := range lines {
-		if found {
-			if m := reVal.FindStringSubmatch(line); m != nil {
-				if m[1] == "user" {
-					user = m[2]
-				}
-				if m[1] == "token" {
-					token = m[2]
-				}
-				continue
-			}
-		}
-		if found && reSection.MatchString(line) {
-			found = false
-		}
-		if reSection.MatchString(line) {
-			matches := reSection.FindStringSubmatch(line)
-			if matches != nil && len(matches) == 2 && matches[1] == "github" {
-				found = true
-				continue
-			}
+func parseSection(line string) string {
+	if reSection.MatchString(line) {
+		matches := reSection.FindStringSubmatch(line)
+		if matches != nil && len(matches) == 2 {
+			return matches[1]
 		}
 	}
-	return user, token
+	return ""
+}
+func parseValue(line string) (string, string) {
+	if m := reVal.FindStringSubmatch(line); m != nil && len(m) == 3 {
+		return m[1], m[2]
+	}
+	return "", ""
+}
+func parseConfig(data []byte) (string, string) {
+	config := make(map[string]map[string]string)
+	lines := strings.Split(string(data), "\n")
+	section := "" //current section tracking while parsing
+	for _, line := range lines {
+		if key, val := parseValue(line); section != "" && key != "" {
+			config[section][key] = val
+			continue
+		}
+		//start of a section
+		section = parseSection(line)
+		if section != "" {
+			config[section] = make(map[string]string)
+		}
+	}
+	if config["github"] == nil {
+		return "", ""
+	}
+	return config["github"]["user"], config["github"]["token"]
 }
 
 func releaseNotes(title string, commits []github.RepositoryCommit) string {
