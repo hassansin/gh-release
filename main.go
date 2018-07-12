@@ -24,14 +24,13 @@ import (
 const (
 	defaultEditor      = "vim"
 	tagPrefix          = "v"
-	releaseMsgFilename = "RELEASE_MSG"
+	releaseMsgFilename = "RELEASE_EDITMSG"
 )
 
 var (
-	releaseMsgFile = path.Join(".git", releaseMsgFilename)
-	reRepo         = regexp.MustCompile(`([a-z-]+)/([a-z-]+)`)
-	reSection      = regexp.MustCompile(`^\[(\w+)\]`)
-	reVal          = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
+	reRepo    = regexp.MustCompile(`([a-z-]+)/([a-z-]+)`)
+	reSection = regexp.MustCompile(`^\[(\w+)\]`)
+	reVal     = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
 
 	cyan          = promptui.Styler(promptui.FGCyan, promptui.FGBold)
 	green         = promptui.Styler(promptui.FGGreen, promptui.FGBold)
@@ -42,8 +41,10 @@ var (
 func main() {
 	mustBeGitRepo()
 	editorCmd := mustFindEditor()
-	if err := do(editorCmd); err != nil {
-		panic(err)
+	token := mustGetToken()
+
+	if err := do(editorCmd, token); err != nil {
+		abort(err)
 	}
 }
 
@@ -75,6 +76,9 @@ func (c *Client) compare(base, head string) (*github.CommitsComparison, error) {
 }
 
 func (c *Client) createRelease(title, tag, target, body string) (*github.RepositoryRelease, error) {
+	if title == "" || len(body) == 0 {
+		return nil, errors.New("aborting due to empty release title and message")
+	}
 	release, _, err := c.client.Repositories.CreateRelease(c.ctx, c.owner, c.repo, &github.RepositoryRelease{
 		Name:            &title,
 		TagName:         &tag,
@@ -100,12 +104,11 @@ func wrap(err error, msg string) error {
 	}
 	return err
 }
-
-func do(editorCmd []string) error {
-	token, err := getToken()
-	if err != nil {
-		return err
-	}
+func abort(err error) {
+	fmt.Printf("%v %v\n", promptui.IconBad, err)
+	os.Exit(1)
+}
+func do(editorCmd []string, token string) error {
 	owner, repo, head, err := getCurrentRepo()
 	if err != nil {
 		return err
@@ -128,7 +131,7 @@ func do(editorCmd []string) error {
 	lastRel := *latest.TagName
 	v, err := semver.Make(strings.TrimPrefix(lastRel, tagPrefix))
 	if err != nil {
-		panic(err)
+		return err
 	}
 	v.Patch++
 	version := v.String()
@@ -139,9 +142,8 @@ func do(editorCmd []string) error {
 	if err != nil {
 		return err
 	}
-	if *compare.Status == "behind" {
-		fmt.Printf("%v is already released", *target.Name)
-		return nil
+	if *compare.Status != "ahead" {
+		return errors.Errorf("%v is already released", cyan(*target.Name))
 	}
 	templates := &promptui.PromptTemplates{
 		Success: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} %v`, promptui.IconGood, "Tag:", startBoldCyan),
@@ -168,10 +170,6 @@ func do(editorCmd []string) error {
 	title, body, err := ed.edit(releaseNotes(tagName, compare.Commits))
 	if err != nil {
 		return err
-	}
-	if title == "" || len(body) == 0 {
-		fmt.Println("aborting due to empty release title and message")
-		return nil
 	}
 	release, err := client.createRelease(title, tagName, *compare.Commits[len(compare.Commits)-1].SHA, body)
 	if err != nil {
@@ -251,6 +249,14 @@ func selectTarget(branches []*github.Branch) (*github.Branch, error) {
 	return branches[i], nil
 }
 
+func mustGetToken() string {
+	token, err := getToken()
+	if err != nil {
+		abort(err)
+	}
+	return token
+}
+
 func getToken() (string, error) {
 	u, err := user.Current()
 	if err != nil {
@@ -285,10 +291,10 @@ func mustBeGitRepo() {
 	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
 	out, err := cmd.Output()
 	if err != nil {
-		panic(err)
+		abort(err)
 	}
 	if strings.TrimSpace(string(out)) != "true" {
-		panic(errors.New("not a git repo"))
+		abort(errors.New("not a git repo"))
 	}
 }
 
@@ -355,15 +361,20 @@ func mustFindEditor() []string {
 	parts := re.Split(env, -1)
 	path, err := exec.LookPath(parts[0])
 	if err != nil {
-		panic(fmt.Errorf("unable to find editor(%v): %v", parts[0], err))
+		abort(fmt.Errorf("unable to find editor(%v): %v", parts[0], err))
 	}
 	return append([]string{path}, parts[1:]...)
 }
 
 func newEditor(cmd []string) (*editor, error) {
+	gitDir := ".git"
+	if dir, ok := os.LookupEnv("GIT_DIR"); ok {
+		gitDir = dir
+	}
+	file := path.Join(gitDir, releaseMsgFilename)
 	return &editor{
 		cmd:  cmd,
-		file: releaseMsgFile,
+		file: file,
 		mode: 0644,
 	}, nil
 
