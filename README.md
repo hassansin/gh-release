@@ -28,7 +28,7 @@ export PATH=$PATH:$GOPATH/bin
 3. (optional) When editing release message, it will open the editor found in `$EDITOR` environment variable, will fallback to `vim` if not found. You can set the environment variable to the path of your editor executable.
 
 ```
-export EDITOR=/usr/bin/code
+export EDITOR="/usr/bin/code -w"
 ```
 
 ## Usage

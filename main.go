@@ -41,7 +41,8 @@ var (
 
 func main() {
 	mustBeGitRepo()
-	if err := do(); err != nil {
+	editorCmd := mustFindEditor()
+	if err := do(editorCmd); err != nil {
 		panic(err)
 	}
 }
@@ -100,7 +101,7 @@ func wrap(err error, msg string) error {
 	return err
 }
 
-func do() error {
+func do(editorCmd []string) error {
 	token, err := getToken()
 	if err != nil {
 		return err
@@ -159,7 +160,7 @@ func do() error {
 		return err
 	}
 
-	ed, err := newEditor()
+	ed, err := newEditor(editorCmd)
 	if err != nil {
 		return err
 	}
@@ -345,17 +346,23 @@ func releaseNotes(title string, commits []github.RepositoryCommit) string {
 %v`, title, notes)
 }
 
-func newEditor() (*editor, error) {
+func mustFindEditor() []string {
 	env := os.Getenv("EDITOR")
 	if env == "" {
 		env = defaultEditor
 	}
-	path, err := exec.LookPath(env)
+	re := regexp.MustCompile("\\s")
+	parts := re.Split(env, -1)
+	path, err := exec.LookPath(parts[0])
 	if err != nil {
-		return nil, fmt.Errorf("unable to find editor(%v): %v", path, err)
+		panic(fmt.Errorf("unable to find editor(%v): %v", parts[0], err))
 	}
+	return append([]string{path}, parts[1:]...)
+}
+
+func newEditor(cmd []string) (*editor, error) {
 	return &editor{
-		path: path,
+		cmd:  cmd,
 		file: releaseMsgFile,
 		mode: 0644,
 	}, nil
@@ -363,7 +370,7 @@ func newEditor() (*editor, error) {
 }
 
 type editor struct {
-	path string
+	cmd  []string
 	file string
 	mode os.FileMode
 }
@@ -372,7 +379,8 @@ func (ed editor) edit(msg string) (string, string, error) {
 	if err := ioutil.WriteFile(ed.file, []byte(msg), ed.mode); err != nil {
 		return "", "", fmt.Errorf("unable to write release message: %v", err)
 	}
-	cmd := exec.Command(ed.path, ed.file)
+
+	cmd := exec.Command(ed.cmd[0], append(ed.cmd[1:], ed.file)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
