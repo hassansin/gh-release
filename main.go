@@ -29,8 +29,9 @@ const (
 
 var (
 	reRepo    = regexp.MustCompile(`([a-z-]+)/([a-z-]+)`)
-	reSection = regexp.MustCompile(`^\[(\w+)\]`)
+	reSection = regexp.MustCompile(`^\[(.*)\]`)
 	reVal     = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
+	reComment = regexp.MustCompile(`^\s+#`)
 
 	cyan          = promptui.Styler(promptui.FGCyan, promptui.FGBold)
 	green         = promptui.Styler(promptui.FGGreen, promptui.FGBold)
@@ -283,8 +284,11 @@ func getToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, token := parseConfig(data)
-	return token, nil
+	config := parseConfig(data)
+	if config["github"] == nil {
+		return "", nil
+	}
+	return config["github"]["token"], nil
 }
 
 func getCurrentRepo() (owner string, repo string, head string, err error) {
@@ -329,11 +333,18 @@ func parseValue(line string) (string, string) {
 	}
 	return "", ""
 }
-func parseConfig(data []byte) (string, string) {
+func isComment(line string) bool {
+	return reComment.MatchString(line)
+}
+
+func parseConfig(data []byte) map[string]map[string]string {
 	config := make(map[string]map[string]string)
 	lines := strings.Split(string(data), "\n")
 	section := "" //current section tracking while parsing
 	for _, line := range lines {
+		if isComment(line) {
+			continue
+		}
 		if key, val := parseValue(line); section != "" && key != "" {
 			config[section][key] = val
 			continue
@@ -344,10 +355,7 @@ func parseConfig(data []byte) (string, string) {
 			config[section] = make(map[string]string)
 		}
 	}
-	if config["github"] == nil {
-		return "", ""
-	}
-	return config["github"]["user"], config["github"]["token"]
+	return config
 }
 
 func releaseNotes(title string, commits []github.RepositoryCommit) string {
@@ -424,7 +432,7 @@ func (ed editor) edit(msg string) (string, string, error) {
 	lines := strings.Split(string(data), "\n")
 	newLines := lines[:0]
 	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimPrefix(line, " "), "#") {
+		if isComment(line) {
 			continue
 		}
 		newLines = append(newLines, line)
