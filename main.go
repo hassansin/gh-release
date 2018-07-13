@@ -149,21 +149,18 @@ func do(editorCmd []string, token string) error {
 		return err
 	}
 
-	ed, err := newEditor(editorCmd)
-	if err != nil {
-		return err
-	}
+	ed := newEditor(editorCmd)
 
 	title, body, err := ed.edit(releaseNotes(tagName, compare.Commits))
 	if err != nil {
 		return err
 	}
-	release, err := client.createRelease(title, tagName, *compare.Commits[len(compare.Commits)-1].SHA, body)
+	release, err := client.createRelease(title, tagName, *target.Commit.SHA, body)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("%v New release(%v) created:\n\t%v\n", green(promptui.IconGood), cyan(*release.TagName), *release.HTMLURL)
+	fmt.Printf("%v New release(%v) created:\n  %v\n", green(promptui.IconGood), cyan(*release.TagName), *release.HTMLURL)
 	return nil
 }
 
@@ -385,7 +382,7 @@ func mustFindEditor() []string {
 	return append([]string{path}, parts[1:]...)
 }
 
-func newEditor(cmd []string) (*editor, error) {
+func newEditor(cmd []string) *editor {
 	gitDir := ".git"
 	if dir, ok := os.LookupEnv("GIT_DIR"); ok {
 		gitDir = dir
@@ -395,8 +392,7 @@ func newEditor(cmd []string) (*editor, error) {
 		cmd:  cmd,
 		file: file,
 		mode: 0644,
-	}, nil
-
+	}
 }
 
 type editor struct {
