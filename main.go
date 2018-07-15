@@ -31,7 +31,7 @@ var (
 	reRepo    = regexp.MustCompile(`([a-z-]+)/([a-z-]+)`)
 	reSection = regexp.MustCompile(`^\[(.*)\]`)
 	reVal     = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
-	reComment = regexp.MustCompile(`^\s+#`)
+	reComment = regexp.MustCompile(`^\s*#`)
 
 	cyan          = promptui.Styler(promptui.FGCyan, promptui.FGBold)
 	green         = promptui.Styler(promptui.FGGreen, promptui.FGBold)
@@ -271,6 +271,9 @@ func mustGetToken() string {
 	if err != nil {
 		abort(err)
 	}
+	if token == "" {
+		abort(errors.New("token not found in your gitconfig file"))
+	}
 	return token
 }
 
@@ -425,6 +428,10 @@ func (ed editor) edit(msg string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	title, body := parseReleaseMsg(data)
+	return title, body, nil
+}
+func parseReleaseMsg(data []byte) (string, string) {
 	//validate:
 	//1. remove comments
 	//2. remove trailing blank lines
@@ -437,5 +444,8 @@ func (ed editor) edit(msg string) (string, string, error) {
 		}
 		newLines = append(newLines, line)
 	}
-	return newLines[0], strings.Join(newLines[1:], "\n"), nil
+	if len(newLines) == 0 {
+		return "", ""
+	}
+	return newLines[0], strings.TrimSpace(strings.Join(newLines[1:], "\n"))
 }

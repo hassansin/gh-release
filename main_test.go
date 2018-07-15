@@ -45,3 +45,53 @@ func TestParseConfig(t *testing.T) {
 		t.FailNow()
 	}
 }
+
+func TestParseReleaseMsg(t *testing.T) {
+	testCases := []struct {
+		name        string
+		inp         []byte
+		title, body string
+	}{
+		{
+			"empty input",
+			[]byte{},
+			"",
+			"",
+		},
+		{
+			"one line",
+			[]byte(`v1.0.0\n`),
+			"v1.0.0",
+			"",
+		},
+		{
+			"multi lines",
+			[]byte(`v1.0.0
+some text
+some more text`),
+			"v1.0.0",
+			"some text\nsome more text",
+		},
+		{
+			"commented lines",
+			[]byte(`#v1.0.0
+#some text
+#some more text`),
+			"",
+			"",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, body := parseReleaseMsg(tc.inp)
+			if title != tc.title {
+				fmt.Printf("exp: %v\ngot: %v\n\n", tc.title, title)
+				t.FailNow()
+			}
+			if body != tc.body {
+				fmt.Printf("exp: %v\ngot: %v\n\n", tc.body, body)
+				t.FailNow()
+			}
+		})
+	}
+}
