@@ -16,7 +16,7 @@ import (
 
 	"github.com/blang/semver"
 	"github.com/google/go-github/github"
-	"github.com/hassansin/promptui"
+	"github.com/manifoldco/promptui"
 	"github.com/pkg/errors"
 	"golang.org/x/oauth2"
 )
