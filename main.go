@@ -119,6 +119,7 @@ func do(editorCmd []string, client github.GithubClient, head string) error {
 	if err != nil {
 		return err
 	}
+	go showProgress("creating release", done)
 	release, err := client.CreateRelease(&github.Release{
 		Name: title,
 		Tag: github.Tag{
@@ -127,6 +128,7 @@ func do(editorCmd []string, client github.GithubClient, head string) error {
 		},
 		Description: body,
 	})
+	done <- struct{}{}
 	if err != nil {
 		return err
 	}
@@ -418,7 +420,7 @@ func showProgress(msg string, done chan struct{}) {
 	i := 1
 	for {
 		fmt.Print(faint(lineReset))
-		fmt.Printf("%v %v", green(progress[i%len(progress)]), faint("Getting latest release"))
+		fmt.Printf("%v %v", green(progress[i%len(progress)]), faint(msg))
 
 		select {
 		case <-done:
