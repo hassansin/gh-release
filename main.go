@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -12,19 +11,19 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/blang/semver"
-	"github.com/google/go-github/github"
+	"github.com/hassansin/gh-release/internal/github"
 	"github.com/manifoldco/promptui"
 	"github.com/pkg/errors"
-	"golang.org/x/oauth2"
 )
 
 const (
 	defaultEditor      = "vim"
 	tagPrefix          = "v"
 	releaseMsgFilename = "RELEASE_EDITMSG"
+	lineReset          = "\033[2K\r"
 )
 
 var (
@@ -33,77 +32,22 @@ var (
 	reVal     = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
 	reComment = regexp.MustCompile(`^\s*#`)
 
+	bold          = promptui.Styler(promptui.FGBold)
 	cyan          = promptui.Styler(promptui.FGCyan, promptui.FGBold)
+	white         = promptui.Styler(promptui.FGWhite, promptui.FGBold)
 	green         = promptui.Styler(promptui.FGGreen, promptui.FGBold)
-	faint         = promptui.Styler(promptui.FGFaint, promptui.FGBold)
+	faint         = promptui.Styler(promptui.FGFaint)
 	startBoldCyan = strings.Replace(cyan(""), promptui.ResetCode, "", -1)
 )
 
 func main() {
-	mustBeGitRepo()
+	owner, name, head := mustGetCurrentRepo()
 	editorCmd := mustFindEditor()
 	token := mustGetToken()
-
-	if err := do(editorCmd, token); err != nil {
+	client := github.New(owner, name, token)
+	if err := do(editorCmd, client, head); err != nil {
 		abort(err)
 	}
-}
-
-func newClient(token, owner, repo string) *Client {
-	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: token},
-	)
-	tc := oauth2.NewClient(ctx, ts)
-	client := github.NewClient(tc)
-	return &Client{
-		client: client,
-		owner:  owner,
-		repo:   repo,
-		ctx:    ctx,
-	}
-}
-
-//Client - Wrapper around github.Client
-type Client struct {
-	ctx         context.Context
-	owner, repo string
-	client      *github.Client
-}
-
-func (c *Client) compare(base, head string) (*github.CommitsComparison, error) {
-	compare, _, err := c.client.Repositories.CompareCommits(c.ctx, c.owner, c.repo, base, head)
-	return compare, wrap(err, "unable to compare commits")
-}
-
-func (c *Client) createRelease(title, tag, target, body string) (*github.RepositoryRelease, error) {
-	if title == "" || len(body) == 0 {
-		return nil, errors.New("aborting due to empty release title and message")
-	}
-	release, _, err := c.client.Repositories.CreateRelease(c.ctx, c.owner, c.repo, &github.RepositoryRelease{
-		Name:            &title,
-		TagName:         &tag,
-		TargetCommitish: &target,
-		Body:            &body,
-	})
-	return release, wrap(err, "unable to create new release")
-}
-func (c *Client) getLatestRelease() (*github.RepositoryRelease, error) {
-	latest, _, err := c.client.Repositories.GetLatestRelease(c.ctx, c.owner, c.repo)
-	return latest, wrap(err, "unable to get latest release")
-}
-
-func (c *Client) listBranches() ([]*github.Branch, error) {
-	branches, _, err := c.client.Repositories.ListBranches(c.ctx, c.owner, c.repo, nil)
-	return branches, wrap(err, "unable to list branches")
-}
-
-//wrap wraps an error with context
-func wrap(err error, msg string) error {
-	if err != nil {
-		err = errors.Wrap(err, msg)
-	}
-	return err
 }
 
 //abort exits with non-zero status, prints pretty error message instead of panic
@@ -112,56 +56,82 @@ func abort(err error) {
 	os.Exit(1)
 }
 
-func do(editorCmd []string, token string) error {
-	owner, repo, head, err := getCurrentRepo()
+func do(editorCmd []string, client github.GithubClient, head string) error {
+	done := make(chan struct{})
+	go showProgress("getting current release", done)
+
+	repo, err := client.GetRepository()
 	if err != nil {
 		return err
 	}
-	client := newClient(token, owner, repo)
-
-	latest, branches, err := getBranchesAndReleases(client)
-	if err != nil {
-		return err
+	if len(repo.Branches) == 0 {
+		return errors.New("Couldn't find any remote branch")
 	}
-	sortBranches(branches, head)
-
-	if latest == nil {
+	if repo.LatestRelease == nil {
 		return errors.New("no previous release") //@TODO
 	}
-	target, err := selectTarget(branches)
+
+	sortBranches(repo.Branches, head)
+
+	done <- struct{}{}
+	/*
+		fmt.Printf("%v %v %v\n\t%v, \n\t%v\n",
+			green(promptui.IconGood),
+			white("Current release:"),
+			cyan(repo.LatestRelease.Name),
+			faint("Tag: "+repo.LatestRelease.Tag.Name),
+			faint("Commit: "+repo.LatestRelease.Tag.Target.ShortID+" "+repo.LatestRelease.Tag.Target.Message))
+	*/
+
+	target, err := selectTarget(repo.Branches, repo.LatestRelease)
 	if err != nil || target == nil {
 		return err
 	}
-	lastRel := *latest.TagName
+	lastRel := repo.LatestRelease.Tag.Name
 	version, err := nextVersion(lastRel)
 	if err != nil {
 		return err
 	}
-	compare, err := client.compare(lastRel, *target.Name)
-	if err != nil {
-		return err
-	}
-	if *compare.Status != "ahead" {
-		return errors.Errorf("%v is already released", cyan(*target.Name))
-	}
+	var commits []*github.Commit
+	errCh := make(chan error)
+
+	go func() {
+		commits, err = client.CompareCommits(repo.LatestRelease.Tag.Target, target.Head)
+		errCh <- err
+	}()
 
 	tagName, err := promptTag(version, lastRel)
 	if err != nil || tagName == "" {
 		return err
 	}
 
+	if err := <-errCh; err != nil {
+		return err
+	}
+
+	if len(commits) == 0 {
+		return errors.Errorf("%v is already released", cyan(target.Name))
+	}
+
 	ed := newEditor(editorCmd)
 
-	title, body, err := ed.edit(releaseNotes(tagName, compare.Commits))
+	title, body, err := ed.edit(releaseNotes(tagName, commits))
 	if err != nil {
 		return err
 	}
-	release, err := client.createRelease(title, tagName, *target.Commit.SHA, body)
+	release, err := client.CreateRelease(&github.Release{
+		Name: title,
+		Tag: github.Tag{
+			Name:   tagName,
+			Target: target.Head,
+		},
+		Description: body,
+	})
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("%v New release(%v) created:\n  %v\n", green(promptui.IconGood), cyan(*release.TagName), *release.HTMLURL)
+	fmt.Printf("%v New release(%v) created:\n  %v\n", green(promptui.IconGood), cyan(release.Tag.Name), release.HTMLURL)
 	return nil
 }
 
@@ -177,41 +147,16 @@ func nextVersion(tag string) (string, error) {
 	}
 	return version, nil
 }
-func getBranchesAndReleases(client *Client) (*github.RepositoryRelease, []*github.Branch, error) {
-	var latest *github.RepositoryRelease
-	var branches []*github.Branch
-	var err error
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		var e error
-		latest, e = client.getLatestRelease()
-		if err == nil {
-			err = e
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		var e error
-		branches, e = client.listBranches()
-		if err == nil {
-			err = e
-		}
-	}()
-	wg.Wait()
-	return latest, branches, err
-}
 
 //sort branches by branch name length, keeping head at the top
 func sortBranches(branches []*github.Branch, head string) {
 	sort.Slice(branches, func(i, j int) bool {
-		li := len(*branches[i].Name)
-		lj := len(*branches[j].Name)
-		if *branches[i].Name == head {
+		li := len(branches[i].Name)
+		lj := len(branches[j].Name)
+		if branches[i].Name == head {
 			li = 0
 		}
-		if *branches[j].Name == head {
+		if branches[j].Name == head {
 			lj = 0
 		}
 		return li < lj
@@ -223,7 +168,7 @@ func promptTag(tag, lastRel string) (string, error) {
 		Success: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} %v`, promptui.IconGood, "Tag:", startBoldCyan),
 	}
 	prompt := promptui.Prompt{
-		Label:     fmt.Sprintf("Enter release tag (last release: %v)", cyan(lastRel)),
+		Label:     fmt.Sprintf("Enter release tag %s", faint("(last release: "+cyan(lastRel)+")")),
 		AllowEdit: true,
 		Default:   tag,
 		Templates: templates,
@@ -237,17 +182,34 @@ func promptTag(tag, lastRel string) (string, error) {
 	}
 	return tagName, nil
 }
-func selectTarget(branches []*github.Branch) (*github.Branch, error) {
-	options := make([]string, len(branches))
-	for i, b := range branches {
-		options[i] = *b.Name
+func selectTarget(branches []*github.Branch, rel *github.Release) (*github.Branch, error) {
+	type option struct {
+		Name   string
+		Count  int
+		Status string
+	}
+	var options []option
+
+	for _, b := range branches {
+		count := b.CommitCount - rel.Tag.CommitCount
+		status := "ahead"
+		if count < 0 {
+			count = -1 * count
+			status = "behind"
+		}
+		//options[i] = fmt.Sprintf("%s (%v commits %v)", b.Name, count, status)
+		options = append(options, option{
+			Name:   b.Name,
+			Status: status,
+			Count:  count,
+		})
 	}
 
 	templates := &promptui.SelectTemplates{
-		Label:    fmt.Sprintf("%s {{.}} ", promptui.IconInitial),
-		Active:   fmt.Sprintf(`%s {{.| cyan }}`, "▣"),
-		Inactive: fmt.Sprintf("%s {{.}}", "▢"),
-		Selected: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} {{.| cyan | bold }}`, promptui.IconGood, "Target:"),
+		Label:    fmt.Sprintf("%s {{.Name}} {{.Count}} {{.Status}}", promptui.IconInitial),
+		Active:   fmt.Sprintf(`%s {{printf "%%v (%%v commits %%v)" (.Name|bold) (.Count | yellow)  (.Status | red) }}`, "▣"),
+		Inactive: fmt.Sprintf(`%s {{printf "%%v (%%v commits %%v)" .Name (.Count | yellow) (.Status | red)}}`, "▢"),
+		Selected: fmt.Sprintf(`{{ "%s" | green | bold }} {{"%s" | bold}} {{.Name| cyan | bold }}`, promptui.IconGood, "Target:"),
 	}
 
 	prompt := promptui.Select{
@@ -294,18 +256,23 @@ func getToken() (string, error) {
 	return config["github"]["token"], nil
 }
 
-func getCurrentRepo() (owner string, repo string, head string, err error) {
+func mustGetCurrentRepo() (owner string, repo string, head string) {
+	mustBeGitRepo()
 	cmd := exec.Command("git", "ls-remote", "--get-url", "origin")
 	var out []byte
+	var err error
 	out, err = cmd.Output()
 	if err != nil {
-		return
+		panic(err)
 	}
 	if m := reRepo.FindStringSubmatch(string(out)); m != nil {
 		owner, repo = m[1], m[2]
 	}
 	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	out, err = cmd.Output()
+	if err != nil {
+		panic(err)
+	}
 	head = strings.TrimSpace(string(out))
 	return
 }
@@ -361,12 +328,12 @@ func parseConfig(data []byte) map[string]map[string]string {
 	return config
 }
 
-func releaseNotes(title string, commits []github.RepositoryCommit) string {
+func releaseNotes(title string, commits []*github.Commit) string {
 	notes := ""
 	for i := len(commits) - 1; i >= 0; i-- {
 		c := commits[i]
-		lines := strings.Split(*c.Commit.Message, "\n")
-		notes += fmt.Sprintf("#* [%v] - %v (%v)\n", *c.SHA, lines[0], *c.Commit.Author.Name)
+		lines := strings.Split(c.Message, "\n")
+		notes += fmt.Sprintf("#* [%v] - %v (%v)\n", c.ShortID, lines[0], c.Author)
 	}
 	return fmt.Sprintf(`#%v
 #
@@ -432,10 +399,6 @@ func (ed editor) edit(msg string) (string, string, error) {
 	return title, body, nil
 }
 func parseReleaseMsg(data []byte) (string, string) {
-	//validate:
-	//1. remove comments
-	//2. remove trailing blank lines
-	//3. at least one non-empty line
 	lines := strings.Split(string(data), "\n")
 	newLines := lines[:0]
 	for _, line := range lines {
@@ -448,4 +411,21 @@ func parseReleaseMsg(data []byte) (string, string) {
 		return "", ""
 	}
 	return newLines[0], strings.TrimSpace(strings.Join(newLines[1:], "\n"))
+}
+func showProgress(msg string, done chan struct{}) {
+	progress := []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
+	defer fmt.Print(faint(lineReset))
+	i := 1
+	for {
+		fmt.Print(faint(lineReset))
+		fmt.Printf("%v %v", green(progress[i%len(progress)]), faint("Getting latest release"))
+
+		select {
+		case <-done:
+			return
+		default:
+			time.Sleep(50 * time.Millisecond)
+			i++
+		}
+	}
 }

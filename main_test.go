@@ -60,7 +60,7 @@ func TestParseReleaseMsg(t *testing.T) {
 		},
 		{
 			"one line",
-			[]byte(`v1.0.0\n`),
+			[]byte("v1.0.0\n"),
 			"v1.0.0",
 			"",
 		},
@@ -85,11 +85,11 @@ some more text`),
 		t.Run(tc.name, func(t *testing.T) {
 			title, body := parseReleaseMsg(tc.inp)
 			if title != tc.title {
-				fmt.Printf("exp: %v\ngot: %v\n\n", tc.title, title)
+				fmt.Printf("title: exp: %v\ngot: %v\n\n", tc.title, title)
 				t.FailNow()
 			}
 			if body != tc.body {
-				fmt.Printf("exp: %v\ngot: %v\n\n", tc.body, body)
+				fmt.Printf("body: exp: %v\ngot: %v\n\n", tc.body, body)
 				t.FailNow()
 			}
 		})
