@@ -194,12 +194,12 @@ func (c *Github) CreateRelease(r *Release) (*Release, error) {
 		return nil, errors.New("empty release title and message")
 	}
 	client := github.NewClient(c.client)
-	_, _, err := client.Repositories.CreateRelease(c.ctx, c.owner, c.name, &github.RepositoryRelease{
+	rel, _, err := client.Repositories.CreateRelease(c.ctx, c.owner, c.name, &github.RepositoryRelease{
 		Name:            &r.Name,
 		TagName:         &r.Tag.Name,
 		TargetCommitish: &r.Tag.Target.ID,
 		Body:            &r.Description,
-		HTMLURL:         &r.HTMLURL,
 	})
+	r.HTMLURL = *rel.HTMLURL
 	return r, err
 }
