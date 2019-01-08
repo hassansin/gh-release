@@ -27,7 +27,7 @@ const (
 )
 
 var (
-	reRepo    = regexp.MustCompile(`([a-z-]+)/([a-z-]+)`)
+	reRepo    = regexp.MustCompile(`[/:]([a-z-]+)/([a-z-]+)`)
 	reSection = regexp.MustCompile(`^\[(.*)\]`)
 	reVal     = regexp.MustCompile(`^\s+(\w+)\s*=\s*(.*)$`)
 	reComment = regexp.MustCompile(`^\s*#`)
