@@ -73,24 +73,30 @@ type Github struct {
 
 func (c *Github) GetRepository() (*Repository, error) {
 	client := githubv4.NewClient(c.client)
+	type CommitHistory struct {
+		History struct {
+			TotalCount int
+			Edges      []struct {
+				Node struct {
+					Message        string
+					Oid            string
+					AbbreviatedOid string
+					Author         struct {
+						Name string
+					}
+				}
+			}
+		} `graphql:"history(first:1)"`
+	}
 	type RefNode struct {
 		Name   string
 		Target struct {
-			Commit struct {
-				History struct {
-					TotalCount int
-					Edges      []struct {
-						Node struct {
-							Message        string
-							Oid            string
-							AbbreviatedOid string
-							Author         struct {
-								Name string
-							}
-						}
-					}
-				} `graphql:"history(first:1)"`
-			} `graphql:"... on Commit"`
+			CommitHistory `graphql:"... on Commit"`
+			Tag           struct {
+				Target struct {
+					CommitHistory `graphql:"... on Commit"`
+				}
+			} `graphql:"... on Tag"`
 		}
 	}
 
@@ -123,21 +129,28 @@ func (c *Github) GetRepository() (*Repository, error) {
 	}
 	releases := query.Repository.Releases.Edges
 	var latestRelease *Release
-	if len(releases) > 0 && len(releases[0].Node.Tag.Target.Commit.History.Edges) > 0 {
-		n := releases[0].Node
-		t := n.Tag
-		c := t.Target.Commit.History.Edges[0].Node
-		latestRelease = &Release{
-			Name: n.Name,
-			Tag: Tag{
-				Name:        t.Name,
-				CommitCount: t.Target.Commit.History.TotalCount,
-				Target: &Commit{
-					Message: c.Message,
-					ID:      c.Oid,
-					ShortID: c.AbbreviatedOid,
+	if len(releases) > 0 {
+		commitHistory := releases[0].Node.Tag.Target.CommitHistory
+		if len(commitHistory.History.Edges) == 0 {
+			commitHistory = releases[0].Node.Tag.Target.Tag.Target.CommitHistory
+		}
+		if len(commitHistory.History.Edges) > 0 {
+
+			n := releases[0].Node
+			t := n.Tag
+			c := commitHistory.History.Edges[0].Node
+			latestRelease = &Release{
+				Name: n.Name,
+				Tag: Tag{
+					Name:        t.Name,
+					CommitCount: commitHistory.History.TotalCount,
+					Target: &Commit{
+						Message: c.Message,
+						ID:      c.Oid,
+						ShortID: c.AbbreviatedOid,
+					},
 				},
-			},
+			}
 		}
 	}
 	var branches []*Branch
@@ -147,10 +160,10 @@ func (c *Github) GetRepository() (*Repository, error) {
 		for _, ref := range refs {
 			br := &Branch{
 				Name:        ref.Node.Name,
-				CommitCount: ref.Node.Target.Commit.History.TotalCount,
+				CommitCount: ref.Node.Target.CommitHistory.History.TotalCount,
 			}
 			if br.CommitCount > 0 {
-				c := ref.Node.Target.Commit.History.Edges[0].Node
+				c := ref.Node.Target.CommitHistory.History.Edges[0].Node
 				br.Head = &Commit{
 					Message: c.Message,
 					ID:      c.Oid,
